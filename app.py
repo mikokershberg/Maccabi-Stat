@@ -11,7 +11,7 @@ st.set_page_config(
 
 DB_FILE = "maccabi_stats.db"
 
-# --- DATABASE SETUP & MIGRATION ---
+# --- DATABASE SETUP & AUTO-MIGRATION ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -58,6 +58,24 @@ def init_db():
         )
     ''')
     
+    # --- AUTO MIGRATION: Ensure existing DB files get newly added columns ---
+    expected_cols = {
+        'id': 'INTEGER', 'match_id': 'INTEGER', 'season': 'TEXT', 
+        'player_name': 'TEXT', 'team_name': 'TEXT', 'is_home': 'BOOLEAN',
+        'minutes': 'REAL', 'points': 'INTEGER', 'ft_made': 'INTEGER', 
+        'ft_attempts': 'INTEGER', 'fg2_made': 'INTEGER', 'fg2_attempts': 'INTEGER',
+        'fg3_made': 'INTEGER', 'fg3_attempts': 'INTEGER', 'rebounds': 'INTEGER',
+        'assists': 'INTEGER', 'steals': 'INTEGER', 'blocks': 'INTEGER',
+        'turnovers': 'INTEGER', 'fouls': 'INTEGER', 'plus_minus': 'REAL'
+    }
+    
+    c.execute("PRAGMA table_info(player_stats)")
+    existing_cols = [col[1] for col in c.fetchall()]
+    
+    for col_name, col_type in expected_cols.items():
+        if col_name not in existing_cols:
+            c.execute(f"ALTER TABLE player_stats ADD COLUMN {col_name} {col_type} DEFAULT 0")
+
     # Seed Schedule if empty
     c.execute("SELECT COUNT(*) FROM matches")
     if c.fetchone()[0] == 0:
@@ -120,6 +138,18 @@ def highlight_maccabi(row):
         return ["background-color: #FFFDE7; font-weight: bold;"] * len(row)
     return [""] * len(row)
 
+# Helper function to safely ensure default columns exist in any retrieved Pandas DataFrame
+def safe_prepare_stats_df(df):
+    required_defaults = {
+        'id': 0, 'player_name': 'Unknown', 'season': '2025-2026',
+        'points': 0, 'ft_made': 0, 'ft_attempts': 0, 'fg3_made': 0,
+        'rebounds': 0, 'assists': 0, 'fouls': 0, 'plus_minus': 0.0
+    }
+    for col, default_val in required_defaults.items():
+        if col not in df.columns:
+            df[col] = default_val
+    return df
+
 # --- HEADER & NAVIGATION ---
 st.title("🏀 Maccabi Antwerpen — Team & League Portal")
 st.caption("2e Provincial Heren Antwerpen B | Season Schedule, Detailed Box Scores & Analytics")
@@ -177,7 +207,7 @@ with tabs[0]:
     )
 
 # ==========================================
-# TAB 2: PLAYER & TEAM STATS (FIXED BUG HERE)
+# TAB 2: PLAYER & TEAM STATS (SAFE AGGREGATION)
 # ==========================================
 with tabs[1]:
     st.header("Player & Team Statistics")
@@ -189,31 +219,43 @@ with tabs[1]:
     if stats_df.empty:
         st.info("No box score statistics available yet.")
     else:
+        stats_df = safe_prepare_stats_df(stats_df)
         seasons = sorted(stats_df['season'].unique().tolist(), reverse=True)
         selected_season = st.selectbox("Select Season", seasons)
         
         season_stats = stats_df[stats_df['season'] == selected_season]
         
-        # Clean two-step aggregation (prevents KeyError)
-        player_summary = season_stats.groupby('player_name').agg(
-            Games=('id', 'count'),
-            PPG=('points', 'mean'),
-            Total_FTM=('ft_made', 'sum'),
-            Total_FTA=('ft_attempts', 'sum'),
-            Avg_3PT=('fg3_made', 'mean'),
-            Avg_Rebounds=('rebounds', 'mean'),
-            Avg_Assists=('assists', 'mean'),
-            Avg_Fouls=('fouls', 'mean'),
-            Avg_PlusMinus=('plus_minus', 'mean')
-        ).reset_index()
+        # Completely bulletproof aggregation dictionary
+        agg_dict = {
+            'id': ('Games', 'count'),
+            'points': ('PPG', 'mean'),
+            'ft_made': ('Total_FTM', 'sum'),
+            'ft_attempts': ('Total_FTA', 'sum'),
+            'fg3_made': ('Avg_3PT', 'mean'),
+            'rebounds': ('Avg_Rebounds', 'mean'),
+            'assists': ('Avg_Assists', 'mean'),
+            'fouls': ('Avg_Fouls', 'mean'),
+            'plus_minus': ('Avg_PlusMinus', 'mean')
+        }
+        
+        # Build agg spec dynamically based on actual column presence
+        agg_kwargs = {}
+        for col, (out_name, func) in agg_dict.items():
+            if col in season_stats.columns:
+                agg_kwargs[out_name] = (col, func)
 
-        # Safely compute Free Throw % without Pandas key errors
-        player_summary['FT_PCT'] = (player_summary['Total_FTM'] / player_summary['Total_FTA'] * 100).fillna(0)
+        player_summary = season_stats.groupby('player_name').agg(**agg_kwargs).reset_index()
+
+        # Safely compute Free Throw %
+        if 'Total_FTM' in player_summary.columns and 'Total_FTA' in player_summary.columns:
+            player_summary['FT_PCT'] = (player_summary['Total_FTM'] / player_summary['Total_FTA'].replace(0, pd.NA) * 100).fillna(0)
+        else:
+            player_summary['FT_PCT'] = 0.0
+
         player_summary = player_summary.round(1)
 
-        player_summary = player_summary[[
-            'player_name', 'Games', 'PPG', 'FT_PCT', 'Avg_3PT', 'Avg_Rebounds', 'Avg_Assists', 'Avg_Fouls', 'Avg_PlusMinus'
-        ]].rename(columns={
+        # Rename columns cleanly for presentation
+        rename_map = {
             'player_name': 'Player Name',
             'PPG': 'Points Per Game',
             'FT_PCT': 'Free Throw %',
@@ -222,13 +264,17 @@ with tabs[1]:
             'Avg_Assists': 'Avg Assists',
             'Avg_Fouls': 'Avg Fouls',
             'Avg_PlusMinus': 'Avg +/-'
-        })
+        }
+        
+        display_cols = [c for c in ['player_name', 'Games', 'PPG', 'FT_PCT', 'Avg_3PT', 'Avg_Rebounds', 'Avg_Assists', 'Avg_Fouls', 'Avg_PlusMinus'] if c in player_summary.columns]
+        
+        final_table = player_summary[display_cols].rename(columns=rename_map)
 
         st.subheader(f"Player Averages — Season {selected_season}")
-        st.dataframe(player_summary.sort_values(by="Points Per Game", ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(final_table.sort_values(by="Points Per Game", ascending=False if "Points Per Game" in final_table.columns else True), use_container_width=True, hide_index=True)
 
 # ==========================================
-# TAB 3: MULTI-SEASON COMPARISON (FIXED BUG HERE)
+# TAB 3: MULTI-SEASON COMPARISON
 # ==========================================
 with tabs[2]:
     st.header("Last Season vs Current Season Comparison")
@@ -238,6 +284,8 @@ with tabs[2]:
     conn.close()
 
     if not all_stats.empty:
+        all_stats = safe_prepare_stats_df(all_stats)
+        
         comp_df = all_stats.groupby(['player_name', 'season']).agg(
             Games=('id', 'count'),
             PPG=('points', 'mean'),
@@ -248,7 +296,7 @@ with tabs[2]:
             Avg_PlusMinus=('plus_minus', 'mean')
         ).reset_index()
 
-        comp_df['FT_PCT'] = (comp_df['Total_FTM'] / comp_df['Total_FTA'] * 100).fillna(0)
+        comp_df['FT_PCT'] = (comp_df['Total_FTM'] / comp_df['Total_FTA'].replace(0, pd.NA) * 100).fillna(0)
         comp_df = comp_df.round(1)
 
         comp_df = comp_df[[
@@ -299,19 +347,19 @@ with tabs[3]:
                 
                 close_p_stats = p_df[p_df['match_id'].isin(close_match_ids)] if close_match_ids else p_df
                 
-                total_ft_made = close_p_stats['ft_made'].sum()
-                total_ft_att = close_p_stats['ft_attempts'].sum()
+                total_ft_made = close_p_stats['ft_made'].sum() if 'ft_made' in close_p_stats.columns else 0
+                total_ft_att = close_p_stats['ft_attempts'].sum() if 'ft_attempts' in close_p_stats.columns else 0
                 ft_pct = (total_ft_made / total_ft_att * 100) if total_ft_att > 0 else 0.0
 
                 st.markdown("### 🎯 Free Throw Efficiency Analysis")
                 st.write(f"In **games decided by fewer than 5 points**, Maccabi Antwerpen shot **{ft_pct:.1f}%** from the free throw line ({total_ft_made} made out of {total_ft_att} attempts).")
                 
-                if not close_p_stats.empty:
+                if not close_p_stats.empty and 'ft_made' in close_p_stats.columns:
                     p_breakdown = close_p_stats.groupby('player_name').agg(
                         FT_Made=('ft_made', 'sum'),
                         FT_Attempts=('ft_attempts', 'sum')
                     ).reset_index()
-                    p_breakdown['FT %'] = (p_breakdown['FT_Made'] / p_breakdown['FT_Attempts'] * 100).fillna(0).round(1)
+                    p_breakdown['FT %'] = (p_breakdown['FT_Made'] / p_breakdown['FT_Attempts'].replace(0, pd.NA) * 100).fillna(0).round(1)
                     st.dataframe(p_breakdown.rename(columns={'player_name': 'Player Name'}), use_container_width=True, hide_index=True)
             else:
                 st.info("In current logged sample data, free throw percentage baseline across recorded games is **75.8%** (25 made / 33 attempts). No games under 5 points logged in completed DB yet.")
@@ -319,6 +367,7 @@ with tabs[3]:
         # 2. Home vs Away Comparison
         elif "home" in query_lower or "away" in query_lower or "trend" in query_lower:
             st.markdown("### 🏠 Home vs Away Scoring Comparison")
+            p_df = safe_prepare_stats_df(p_df)
             
             home_stats = p_df[p_df['is_home'] == 1]
             away_stats = p_df[p_df['is_home'] == 0]
