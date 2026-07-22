@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import re
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -59,7 +58,7 @@ def init_db():
         )
     ''')
     
-    # Seed 2026-2027 Schedule if empty
+    # Seed Schedule if empty
     c.execute("SELECT COUNT(*) FROM matches")
     if c.fetchone()[0] == 0:
         seed_schedule = [
@@ -90,7 +89,7 @@ def init_db():
             seed_schedule
         )
 
-    # Seed initial Maccabi roster baseline if empty
+    # Seed initial baseline if empty
     c.execute("SELECT COUNT(*) FROM player_stats")
     if c.fetchone()[0] == 0:
         roster_seed = [
@@ -178,7 +177,7 @@ with tabs[0]:
     )
 
 # ==========================================
-# TAB 2: PLAYER & TEAM STATS
+# TAB 2: PLAYER & TEAM STATS (FIXED BUG HERE)
 # ==========================================
 with tabs[1]:
     st.header("Player & Team Statistics")
@@ -195,18 +194,26 @@ with tabs[1]:
         
         season_stats = stats_df[stats_df['season'] == selected_season]
         
+        # Clean two-step aggregation (prevents KeyError)
         player_summary = season_stats.groupby('player_name').agg(
             Games=('id', 'count'),
             PPG=('points', 'mean'),
-            FT_PCT=('ft_made', lambda x: (x.sum() / season_stats.loc[x.index, 'ft_attempts'].sum() * 100) if season_stats.loc[x.index, 'ft_attempts'].sum() > 0 else 0),
+            Total_FTM=('ft_made', 'sum'),
+            Total_FTA=('ft_attempts', 'sum'),
             Avg_3PT=('fg3_made', 'mean'),
             Avg_Rebounds=('rebounds', 'mean'),
             Avg_Assists=('assists', 'mean'),
             Avg_Fouls=('fouls', 'mean'),
             Avg_PlusMinus=('plus_minus', 'mean')
-        ).reset_index().round(1)
+        ).reset_index()
 
-        player_summary = player_summary.rename(columns={
+        # Safely compute Free Throw % without Pandas key errors
+        player_summary['FT_PCT'] = (player_summary['Total_FTM'] / player_summary['Total_FTA'] * 100).fillna(0)
+        player_summary = player_summary.round(1)
+
+        player_summary = player_summary[[
+            'player_name', 'Games', 'PPG', 'FT_PCT', 'Avg_3PT', 'Avg_Rebounds', 'Avg_Assists', 'Avg_Fouls', 'Avg_PlusMinus'
+        ]].rename(columns={
             'player_name': 'Player Name',
             'PPG': 'Points Per Game',
             'FT_PCT': 'Free Throw %',
@@ -221,7 +228,7 @@ with tabs[1]:
         st.dataframe(player_summary.sort_values(by="Points Per Game", ascending=False), use_container_width=True, hide_index=True)
 
 # ==========================================
-# TAB 3: MULTI-SEASON COMPARISON
+# TAB 3: MULTI-SEASON COMPARISON (FIXED BUG HERE)
 # ==========================================
 with tabs[2]:
     st.header("Last Season vs Current Season Comparison")
@@ -234,13 +241,19 @@ with tabs[2]:
         comp_df = all_stats.groupby(['player_name', 'season']).agg(
             Games=('id', 'count'),
             PPG=('points', 'mean'),
-            FT_PCT=('ft_made', lambda x: (x.sum() / all_stats.loc[x.index, 'ft_attempts'].sum() * 100) if all_stats.loc[x.index, 'ft_attempts'].sum() > 0 else 0),
+            Total_FTM=('ft_made', 'sum'),
+            Total_FTA=('ft_attempts', 'sum'),
             Avg_3PT=('fg3_made', 'mean'),
             Avg_Fouls=('fouls', 'mean'),
             Avg_PlusMinus=('plus_minus', 'mean')
-        ).reset_index().round(1)
+        ).reset_index()
 
-        comp_df = comp_df.rename(columns={
+        comp_df['FT_PCT'] = (comp_df['Total_FTM'] / comp_df['Total_FTA'] * 100).fillna(0)
+        comp_df = comp_df.round(1)
+
+        comp_df = comp_df[[
+            'player_name', 'season', 'Games', 'PPG', 'FT_PCT', 'Avg_3PT', 'Avg_Fouls', 'Avg_PlusMinus'
+        ]].rename(columns={
             'player_name': 'Player Name',
             'season': 'Season',
             'PPG': 'Points Per Game',
@@ -266,10 +279,7 @@ with tabs[3]:
         "Show Maccabi schedule and opponents"
     ]
     
-    st.write("**Suggested Examples:**")
-    st.columns(4)
     selected_sample = st.radio("Quick Prompts:", sample_prompts, index=0)
-    
     user_query = st.text_input("Or type your custom prompt here:", value=selected_sample)
 
     if user_query:
@@ -293,7 +303,7 @@ with tabs[3]:
                 total_ft_att = close_p_stats['ft_attempts'].sum()
                 ft_pct = (total_ft_made / total_ft_att * 100) if total_ft_att > 0 else 0.0
 
-                st.markdown(f"### 🎯 Free Throw Efficiency Analysis")
+                st.markdown("### 🎯 Free Throw Efficiency Analysis")
                 st.write(f"In **games decided by fewer than 5 points**, Maccabi Antwerpen shot **{ft_pct:.1f}%** from the free throw line ({total_ft_made} made out of {total_ft_att} attempts).")
                 
                 if not close_p_stats.empty:
@@ -327,7 +337,7 @@ with tabs[3]:
             pivot_comp = comp.pivot(index='player_name', columns='Location', values='PPG').fillna(0).round(1)
             st.dataframe(pivot_comp, use_container_width=True)
 
-        # 3. Top Scorers / General Stats
+        # 3. Fallback Keyword Matcher
         else:
             st.markdown("### 📊 Custom Query Result")
             matches_df = m_df.rename(columns={
@@ -337,7 +347,6 @@ with tabs[3]:
             })
             matches_df['Time'] = matches_df['Time'].astype(str).str[:5]
             
-            # Simple keyword search fallback
             keywords = [w for w in query_lower.split() if len(w) > 3]
             res = matches_df.copy()
             for kw in keywords:
