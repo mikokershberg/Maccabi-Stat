@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -245,7 +244,6 @@ def init_db():
         )
     ''')
     
-    # Check if matches table is empty, if so, seed schedule
     c.execute("SELECT COUNT(*) FROM matches")
     if c.fetchone()[0] == 0:
         c.executemany(
@@ -253,7 +251,6 @@ def init_db():
             SCHEDULE_DATA
         )
     
-    # Check if roster is seeded for multi-season stats
     c.execute("SELECT COUNT(*) FROM player_stats")
     if c.fetchone()[0] == 0:
         for p in MACCABI_ROSTER:
@@ -270,14 +267,24 @@ init_db()
 def get_connection():
     return sqlite3.connect(DB_FILE)
 
+# --- STYLING HELPER FOR MACCABI MATCH HIGHLIGHTING ---
+def highlight_maccabi(row):
+    is_maccabi = (
+        "Maccabi" in str(row["Home Team"]) or 
+        "Maccabi" in str(row["Away Team"])
+    )
+    if is_maccabi:
+        return ["background-color: #FFFDE7; font-weight: bold;"] * len(row)
+    return [""] * len(row)
+
 # --- HEADER & NAVIGATION ---
 st.title("🏀 Maccabi Antwerpen — Team & League Portal")
-st.caption("2e Provincial Heren Antwerpen B | 182 Pre-Loaded Matches")
+st.caption("2e Provincial Heren Antwerpen B | Season Schedule & Statistics")
 
 tabs = st.tabs([
     "📅 Schedule & Results",
     "📊 Player & Team Stats",
-    "🔄 Last Season vs. Current",
+    "🔄 Last Season vs Current",
     "🔍 Prompt Query",
     "🔒 Admin Interface"
 ])
@@ -286,29 +293,43 @@ tabs = st.tabs([
 # TAB 1: SCHEDULE & RESULTS
 # ==========================================
 with tabs[0]:
-    st.header("Schedule & Results (2e Provincial Heren B)")
+    st.header("Schedule & Results")
     
     conn = get_connection()
     matches_df = pd.read_sql_query("SELECT * FROM matches ORDER BY date ASC", conn)
     conn.close()
 
+    # Clean & Format Columns
+    matches_df['time'] = matches_df['time'].str[:5]  # Format HH:MM
+    matches_df = matches_df.rename(columns={
+        'date': 'Date',
+        'time': 'Time',
+        'home_team': 'Home Team',
+        'home_score': 'Home Score',
+        'away_score': 'Away Score',
+        'away_team': 'Away Team',
+        'status': 'Status'
+    })
+
     col1, col2 = st.columns(2)
     with col1:
-        team_filter = st.selectbox("Filter Team", ["All Teams"] + sorted(list(set(matches_df['home_team']).union(set(matches_df['away_team'])))))
+        team_filter = st.selectbox("Filter Team", ["All Teams"] + sorted(list(set(matches_df['Home Team']).union(set(matches_df['Away Team'])))))
     with col2:
-        status_filter = st.radio("Status", ["All", "Upcoming", "Completed"], horizontal=True)
+        status_filter = st.radio("Status Filter", ["All", "Upcoming", "Completed"], horizontal=True)
 
     filtered = matches_df.copy()
     if team_filter != "All Teams":
-        filtered = filtered[(filtered['home_team'] == team_filter) | (filtered['away_team'] == team_filter)]
+        filtered = filtered[(filtered['Home Team'] == team_filter) | (filtered['Away Team'] == team_filter)]
     if status_filter == "Upcoming":
-        filtered = filtered[filtered['status'] == 'Scheduled']
+        filtered = filtered[filtered['Status'] == 'Scheduled']
     elif status_filter == "Completed":
-        filtered = filtered[filtered['status'] == 'Completed']
+        filtered = filtered[filtered['Status'] == 'Completed']
 
-    st.write(f"Showing **{len(filtered)}** matches:")
+    display_df = filtered[['Date', 'Time', 'Home Team', 'Home Score', 'Away Score', 'Away Team', 'Status']]
+
+    # Render with Maccabi Yellow Highlighting
     st.dataframe(
-        filtered[['date', 'time', 'home_team', 'home_score', 'away_score', 'away_team', 'status']],
+        display_df.style.apply(highlight_maccabi, axis=1),
         use_container_width=True,
         hide_index=True
     )
@@ -317,14 +338,14 @@ with tabs[0]:
 # TAB 2: PLAYER & TEAM STATS
 # ==========================================
 with tabs[1]:
-    st.header("Current Season Statistics (2026–2027)")
+    st.header("Current Season Statistics")
     
     conn = get_connection()
     stats_df = pd.read_sql_query("SELECT * FROM player_stats WHERE season = '2026-2027'", conn)
     conn.close()
 
     if stats_df.empty:
-        st.info("No current season games logged yet. Admin can log box scores in the Admin panel!")
+        st.info("No current season games logged yet. You can log new box scores under the Admin Interface tab!")
     else:
         player_summary = stats_df.groupby('player_name').agg(
             Games=('id', 'count'),
@@ -334,14 +355,22 @@ with tabs[1]:
             Avg_PlusMinus=('plus_minus', 'mean')
         ).reset_index().round(2)
 
+        player_summary = player_summary.rename(columns={
+            'player_name': 'Player Name',
+            'Avg_Points': 'Average Points',
+            'Avg_3PT': 'Average 3PT',
+            'Avg_Fouls': 'Average Fouls',
+            'Avg_PlusMinus': 'Average Plus Minus'
+        })
+
         st.subheader("Player Performance Averages")
-        st.dataframe(player_summary.sort_values(by="Avg_Points", ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(player_summary.sort_values(by="Average Points", ascending=False), use_container_width=True, hide_index=True)
 
 # ==========================================
 # TAB 3: MULTI-SEASON COMPARISON
 # ==========================================
 with tabs[2]:
-    st.header("Last Season (2025–2026) vs. Current Season (2026–2027)")
+    st.header("Last Season vs Current Season")
     
     conn = get_connection()
     all_stats = pd.read_sql_query("SELECT * FROM player_stats", conn)
@@ -355,31 +384,55 @@ with tabs[2]:
             Avg_Fouls=('fouls', 'mean')
         ).reset_index().round(2)
 
+        season_comp = season_comp.rename(columns={
+            'player_name': 'Player Name',
+            'season': 'Season',
+            'PPG': 'Points Per Game',
+            'Avg_3PT': 'Average 3PT',
+            'Avg_Fouls': 'Average Fouls'
+        })
+
         st.dataframe(season_comp, use_container_width=True, hide_index=True)
 
 # ==========================================
 # TAB 4: NATURAL LANGUAGE PROMPT QUERY
 # ==========================================
 with tabs[3]:
-    st.header("🔍 Ask the Stats Hub")
-    st.write("Type questions to search matches, opponents, or stat trends.")
+    st.header("Ask the Stats Hub")
+    st.write("Type keywords or team names to instantly filter matches and fixtures.")
 
-    query = st.text_input("e.g., 'Maccabi', 'Geel', or 'Guco Lier'")
+    query = st.text_input("Enter Search Query (e.g. Maccabi, Geel, or Guco Lier)")
     
     if query:
         conn = get_connection()
         all_matches = pd.read_sql_query("SELECT * FROM matches", conn)
         conn.close()
 
-        res = all_matches[(all_matches['home_team'].str.contains(query, case=False)) | (all_matches['away_team'].str.contains(query, case=False))]
+        all_matches['time'] = all_matches['time'].str[:5]
+        all_matches = all_matches.rename(columns={
+            'date': 'Date',
+            'time': 'Time',
+            'home_team': 'Home Team',
+            'home_score': 'Home Score',
+            'away_score': 'Away Score',
+            'away_team': 'Away Team',
+            'status': 'Status'
+        })
+
+        res = all_matches[(all_matches['Home Team'].str.contains(query, case=False)) | (all_matches['Away Team'].str.contains(query, case=False))]
         st.write(f"Found **{len(res)}** matching fixtures:")
-        st.dataframe(res[['date', 'time', 'home_team', 'away_team', 'status']], use_container_width=True, hide_index=True)
+        st.dataframe(
+            res[['Date', 'Time', 'Home Team', 'Away Team', 'Status']].style.apply(highlight_maccabi, axis=1),
+            use_container_width=True,
+            hide_index=True
+        )
 
 # ==========================================
 # TAB 5: ADMIN INTERFACE (Password Protected)
 # ==========================================
 with tabs[4]:
-    st.header("🔒 Admin Panel — Log Match Scores")
+    st.header("Admin Interface")
+    st.caption("Log Match Scores & Update Results")
     
     password = st.text_input("Enter Admin Password", type="password")
     
@@ -390,7 +443,8 @@ with tabs[4]:
         matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status = 'Scheduled' ORDER BY date ASC", conn)
         
         if not matches_df.empty:
-            match_options = {f"{row['date']} | {row['home_team']} vs {row['away_team']}": row['id'] for _, row in matches_df.iterrows()}
+            matches_df['time'] = matches_df['time'].str[:5]
+            match_options = {f"{row['date']} at {row['time']} | {row['home_team']} vs {row['away_team']}": row['id'] for _, row in matches_df.iterrows()}
             selected_match_label = st.selectbox("Select Scheduled Game to Log", list(match_options.keys()))
             selected_match_id = match_options[selected_match_label]
             
@@ -410,7 +464,7 @@ with tabs[4]:
                         (home_score, away_score, selected_match_id)
                     )
                     conn.commit()
-                    st.success("Game score updated and synchronized live!")
+                    st.success("Game score updated and synchronized live across all clients!")
                     st.rerun()
         conn.close()
     elif password != "":
